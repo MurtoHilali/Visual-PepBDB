@@ -16,7 +16,7 @@ class dynamic_model(nn.Module):
             nn.Conv2d(int(C_in_1), int(C_out_1), kernel_size=kernel_size_1, stride=1, padding=0),
             nn.ReLU())
         
-        H_out_1, W_out_1    = self.output_shape((H_in, W_in), kernel_size=kernel_size_1) # W_in = 38
+        H_out_1, W_out_1    = self.output_shape((H_in, W_in), kernel_size=kernel_size_1) # W_in = 41
         C_in_2, C_out_2     = C_out_1, num_kernels
         kernel_size_2       = 2
         
