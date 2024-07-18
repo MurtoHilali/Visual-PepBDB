@@ -2,7 +2,7 @@ from __future__ import print_function
 import torch
 import os
 import pickle
-import datetime
+from datetime import datetime
 import models
 from datasets import PepBDB_dataset
 from torch.utils.data import DataLoader, Dataset, Subset
@@ -31,6 +31,11 @@ def config():
     exp_settings['glob_loss'] = 10.0
     return exp_settings
 
+import torch
+from torch.utils.data import DataLoader, Subset
+from sklearn.model_selection import train_test_split
+from collections import Counter
+
 def split_and_load_dataset(dataset, exp_settings, train_ratio=0.7, val_ratio=0.15, test_ratio=0.15):
     assert train_ratio + val_ratio + test_ratio == 1, "Ratios must sum to 1"
     
@@ -50,6 +55,14 @@ def split_and_load_dataset(dataset, exp_settings, train_ratio=0.7, val_ratio=0.1
     val_dataset = Subset(dataset, val_indices)
     test_dataset = Subset(dataset, test_indices)
     
+    # Calculate class weights based on the training set
+    train_labels = [dataset.label_list[i] for i in train_indices]
+    class_counts = Counter(train_labels)
+    num_classes = len(class_counts)
+    total_samples = len(train_labels)
+    class_weights = [total_samples / (num_classes * count) for count in class_counts.values()]
+    class_weights = torch.FloatTensor(class_weights)
+    
     print('\n\tLoading datasets...')
     sets = {}
     batch_size = exp_settings['batch_size']
@@ -65,12 +78,12 @@ def split_and_load_dataset(dataset, exp_settings, train_ratio=0.7, val_ratio=0.1
     
     save_details()
     
-    return sets
+    return sets, class_weights
 
-def train(model, data, lr):
+def train(model, data, lr, class_weights):
     global exp_settings, device
-    
-    criterion = nn.CrossEntropyLoss(weight=torch.FloatTensor([1, 6])).to(device)
+
+    criterion = nn.CrossEntropyLoss(weight=class_weights).to(device)
     optimizer = optim.Adam(model.parameters(), lr=lr)
     
     max_loss = 10
@@ -153,7 +166,6 @@ def train(model, data, lr):
     
     return best_val
 
-
 def calc_metrics(iter_dict):
     scores = {}
     temp = confusion_matrix(iter_dict['val_labels'], iter_dict['val_outputs'])
@@ -201,28 +213,30 @@ def save_to_file(file, count, status, loss, sofar, runtime, epochs, lr, num_kern
 
 def main():
     global exp_settings, device
+    
     print('\nTraining CNN for predicting protein-peptide binding sites.' + 
           '\n---------------------------------------------------------')
     device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
-    print('Device:', device)
+    print(f'[{datetime.now().strftime("%H:%M:%S")}] Device:', device)
     
     exp_settings = config()
     
-    print('Loading dataset...')
+    print(f'[{datetime.now().strftime("%H:%M:%S")}] Loading dataset...')
 
     pepbdb_dataset = PepBDB_dataset(exp_settings['root_dir'])
-    data = split_and_load_dataset(dataset=pepbdb_dataset, exp_settings=exp_settings)
+    data, class_weights = split_and_load_dataset(dataset=pepbdb_dataset, exp_settings=exp_settings)
     
-    print('Dataset loaded and split.')
+    print(f'[{datetime.now().strftime("%H:%M:%S")}] Dataset loaded and split.')
     
     model = models.dynamic_model(exp_settings['window_size'], 41, exp_settings['num_kernels']).to(device)
     
-    print('Beginning model training...')
+    print(f'[{datetime.now().strftime("%H:%M:%S")}] Beginning model training...')
     
-    best_val = train(model, data, exp_settings['learning_rate'])
+    best_val = train(model, data, exp_settings['learning_rate'], class_weights)
     scores = calc_metrics(best_val)
     
-    print('Best validation scores:', scores)
+    print(f'[{datetime.now().strftime("%H:%M:%S")}] Best validation scores:', scores)
+
     
 if __name__ == '__main__':
     main()
