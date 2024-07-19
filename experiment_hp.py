@@ -1,21 +1,27 @@
 from __future__ import print_function
 
-import torch
-import os
-import pickle
+from collections import Counter
 from datetime import datetime
 
-import models
-from datasets import PepBDB_dataset
+import numpy as np
+import pickle
+import torch
+import math
+import time
+import os
 
-from torch import nn, optim
-from torch.autograd import Variable
+from datasets import PepBDB_dataset
+import models
+
 from torch.utils.data import DataLoader, Subset
+from torch.autograd import Variable
+from torch import nn, optim
 
 from sklearn.metrics import confusion_matrix, roc_auc_score
 from sklearn.model_selection import train_test_split
 
-import math
+from hyperopt import hp, fmin, tpe, STATUS_OK, Trials
+
 
 def config():
     print('\n\tInitializing experiment configurations...')
@@ -23,8 +29,6 @@ def config():
     exp_settings['batch_size'] = 128
     exp_settings['num_epochs'] = 2500
     exp_settings['patience'] = 10
-    exp_settings['learning_rate'] = 0.000091
-    exp_settings['num_kernels'] = 256
     exp_settings['window_size'] = 7
     exp_settings['root_dir'] = './peppi_data_imgs'  # Root directory for train, val, test
     exp_settings['folder'] = './experiment_output'
@@ -34,12 +38,11 @@ def config():
     exp_settings['run_file'] = os.path.join(exp_settings['folder'], 'eval_summary.txt')
     exp_settings['run_counter'] = 0
     exp_settings['glob_loss'] = 10.0
+    exp_settings['space'] = {
+        'lr': hp.uniform('lr', 0.00001, 0.001),
+        'num_kernels': hp.choice('num_kernels', 256, 512, 1024)  # Change range and step size as needed
+    }
     return exp_settings
-
-import torch
-from torch.utils.data import DataLoader, Subset
-from sklearn.model_selection import train_test_split
-from collections import Counter
 
 def split_and_load_dataset(dataset, exp_settings, train_ratio=0.7, val_ratio=0.15, test_ratio=0.15):
     assert train_ratio + val_ratio + test_ratio == 1, "Ratios must sum to 1"
@@ -84,6 +87,16 @@ def split_and_load_dataset(dataset, exp_settings, train_ratio=0.7, val_ratio=0.1
     save_details()
     
     return sets, class_weights
+
+def create_subset(dataset, subset_ratio=0.1):
+    indices = list(range(len(dataset)))
+    y = dataset.label_list
+    
+    # create a stratified subset for HP tuning
+    subset_indices, _ = train_test_split(indices, test_size=1-subset_ratio, stratify=y, random_state=4)
+    subset_dataset = Subset(dataset, subset_indices)
+    
+    return subset_dataset
 
 def train(model, data, lr, class_weights):
     global exp_settings, device
@@ -145,7 +158,6 @@ def train(model, data, lr, class_weights):
             patience_counter += 1
         if patience_counter == exp_settings['patience']:
             break
-        #num_epochs = exp_settings['num_epocch']
         print(f"\tEpoch: {epoch}/{exp_settings['num_epochs']}. Loss: {val_loss}.")    
     # Save the best validation results
     with open(exp_settings['folder'] + '/run' + str(exp_settings['run_counter']) + '.pickle', 'wb') as f:
@@ -216,8 +228,49 @@ def save_to_file(file, count, status, loss, sofar, runtime, epochs, lr, num_kern
             else: f.write(pad(round(val, 6)) + '|')
         f.write('\n|' + ('-' * (18 * 11)) + '|')
 
+def obj_fn(space):
+    global device, exp_settings
+    start_time = time.time()
+    
+    lr = space['lr']
+    num_kernels = int(space['num_kernels'])
+    model = models.dynamic_model(exp_settings['window_size'], 41, num_kernels).to(device)
+    
+    best_val = train(model, data, lr, class_weights)
+    scores = calc_metrics(best_val)
+    
+    loss = -scores['auc']  # Minimize negative AUC to maximize AUC
+    
+    status = STATUS_OK
+    if loss < exp_settings['glob_loss']:
+        exp_settings['glob_loss'] = loss
+    
+    runtime = str(datetime.timedelta(seconds=round(time.time() - start_time)))
+    print(f'Loss: {loss}, Runtime: {runtime}, LR: {lr}, Num Kernels: {num_kernels}')
+    
+    return {'loss': loss, 'status': status}
+
+def run_trials():
+    global exp_settings, data
+    
+    max_trials = 100  # Number of trials to run
+    file_name = exp_settings['folder'] + '/trials_file.hyperopt'
+    
+    try:
+        trials = pickle.load(open(file_name, 'rb'))
+        print("\n\tFound saved Trials! Loading...")
+    except:
+        print("\n\tCreating new Trials!...")
+        trials = Trials()
+    
+    best = fmin(fn=obj_fn, space=exp_settings['space'], algo=tpe.suggest, trials=trials, max_evals=max_trials)
+    
+    print('Best hyperparameters:', best)
+    with open(file_name, 'wb') as f:
+        pickle.dump(trials, f)
+
 def main():
-    global exp_settings, device
+    global exp_settings, device, data, class_weights
     
     print('\nTraining CNN for predicting protein-peptide binding sites.' + 
           '\n---------------------------------------------------------')
@@ -227,21 +280,40 @@ def main():
     exp_settings = config()
     
     print(f'[{datetime.now().strftime("%H:%M:%S")}] Loading dataset...')
-
+    
     pepbdb_dataset = PepBDB_dataset(exp_settings['root_dir'])
-    data, class_weights = split_and_load_dataset(dataset=pepbdb_dataset, exp_settings=exp_settings)
     
-    print(f'[{datetime.now().strftime("%H:%M:%S")}] Dataset loaded and split.')
+    # Create a smaller subset for hyperparameter tuning
+    subset_dataset = create_subset(pepbdb_dataset, subset_ratio=0.1)
     
-    model = models.dynamic_model(exp_settings['window_size'], 41, exp_settings['num_kernels']).to(device)
+    # Split the subset dataset
+    subset_data, class_weights = split_and_load_dataset(dataset=subset_dataset, exp_settings=exp_settings)
+    data = subset_data  # Use the subset data for hyperparameter tuning
     
-    print(f'[{datetime.now().strftime("%H:%M:%S")}] Beginning model training...')
+    print(f'[{datetime.now().strftime("%H:%M:%S")}] Subset dataset loaded and split.')
     
-    best_val = train(model, data, exp_settings['learning_rate'], class_weights)
+    run_trials()
+    
+    print(f'[{datetime.now().strftime("%H:%M:%S")}] Hyperparameter tuning completed.')
+    
+    best_hp = pickle.load(open(exp_settings['folder'] + '/trials_file.hyperopt', 'rb')).best_trial['result']['space']
+    print('Best hyperparameters:', best_hp)
+    
+    # Train the final model with the best hyperparameters on the full dataset
+    best_lr = best_hp['lr']
+    best_num_kernels = int(best_hp['num_kernels'])
+    
+    # Split the full dataset
+    full_data, class_weights = split_and_load_dataset(dataset=pepbdb_dataset, exp_settings=exp_settings)
+    data = full_data  # Use the full data for final training
+    
+    model = models.dynamic_model(exp_settings['window_size'], 41, best_num_kernels).to(device)
+    
+    best_val = train(model, data, best_lr, class_weights)
     scores = calc_metrics(best_val)
     
     print(f'[{datetime.now().strftime("%H:%M:%S")}] Best validation scores:', scores)
 
-    
 if __name__ == '__main__':
     main()
+
