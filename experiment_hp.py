@@ -1,7 +1,7 @@
 from __future__ import print_function
 
 from collections import Counter
-from datetime import datetime
+from datetime import datetime, timedelta
 
 import numpy as np
 import pickle
@@ -10,7 +10,7 @@ import math
 import time
 import os
 
-from datasets import PepBDB_dataset
+from datasets import PepBDB_dataset, subset_to_pepbdb_dataset
 import models
 
 from torch.utils.data import DataLoader, Subset
@@ -20,16 +20,17 @@ from torch import nn, optim
 from sklearn.metrics import confusion_matrix, roc_auc_score
 from sklearn.model_selection import train_test_split
 
-from hyperopt import hp, fmin, tpe, STATUS_OK, Trials
-
+from hyperopt import hp, fmin, tpe, STATUS_OK, SparkTrials, Trials
+import pyspark
 
 def config():
     print('\n\tInitializing experiment configurations...')
     exp_settings = {}
     exp_settings['batch_size'] = 128
-    exp_settings['num_epochs'] = 2500
+    exp_settings['num_epochs'] = 1000
     exp_settings['patience'] = 10
     exp_settings['window_size'] = 7
+    #exp_settings['root_dir'] = '/home/mhilali/projects/def-bingalls/mhilali/img_output/'  # Root directory for train, val, test
     exp_settings['root_dir'] = './peppi_data_imgs'  # Root directory for train, val, test
     exp_settings['folder'] = './experiment_output'
     if not os.path.exists(exp_settings['folder']):
@@ -40,7 +41,7 @@ def config():
     exp_settings['glob_loss'] = 10.0
     exp_settings['space'] = {
         'lr': hp.uniform('lr', 0.00001, 0.001),
-        'num_kernels': hp.choice('num_kernels', 256, 512, 1024)  # Change range and step size as needed
+        'num_kernels': hp.choice('num_kernels', [256, 512, 1024])  # Change range and step size as needed
     }
     return exp_settings
 
@@ -124,6 +125,7 @@ def train(model, data, lr, class_weights):
             epoch_train_loss.append(loss.item())
             optimizer.zero_grad()
             loss.backward()
+            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
             optimizer.step()
         best_val['train_loss_list'].append(sum(epoch_train_loss) / len(epoch_train_loss))
         
@@ -245,7 +247,7 @@ def obj_fn(space):
     if loss < exp_settings['glob_loss']:
         exp_settings['glob_loss'] = loss
     
-    runtime = str(datetime.timedelta(seconds=round(time.time() - start_time)))
+    runtime = str(timedelta(seconds=round(time.time() - start_time)))
     print(f'Loss: {loss}, Runtime: {runtime}, LR: {lr}, Num Kernels: {num_kernels}')
     
     return {'loss': loss, 'status': status}
@@ -255,6 +257,9 @@ def run_trials():
     
     max_trials = 100  # Number of trials to run
     file_name = exp_settings['folder'] + '/trials_file.hyperopt'
+    
+    # Use SparkTrials to parallelize the search
+    #spark_trials = SparkTrials(parallelism=5)  # Adjust parallelism as needed
     
     try:
         trials = pickle.load(open(file_name, 'rb'))
@@ -285,6 +290,7 @@ def main():
     
     # Create a smaller subset for hyperparameter tuning
     subset_dataset = create_subset(pepbdb_dataset, subset_ratio=0.1)
+    subset_dataset = subset_to_pepbdb_dataset(subset_dataset, pepbdb_dataset)
     
     # Split the subset dataset
     subset_data, class_weights = split_and_load_dataset(dataset=subset_dataset, exp_settings=exp_settings)

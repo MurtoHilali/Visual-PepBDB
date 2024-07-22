@@ -21,10 +21,10 @@ def config():
     print('\n\tInitializing experiment configurations...')
     exp_settings = {}
     exp_settings['batch_size'] = 128
-    exp_settings['num_epochs'] = 2500
+    exp_settings['num_epochs'] = 100
     exp_settings['patience'] = 10
     exp_settings['learning_rate'] = 0.000091
-    exp_settings['num_kernels'] = 256
+    exp_settings['num_kernels'] = 1024
     exp_settings['window_size'] = 7
     exp_settings['root_dir'] = './peppi_data_imgs'  # Root directory for train, val, test
     exp_settings['folder'] = './experiment_output'

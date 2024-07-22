@@ -49,3 +49,28 @@ class PepBDB_dataset(Dataset):
     
     def __len__(self):
         return len(self.label_list)
+    
+def subset_to_pepbdb_dataset(subset, original_dataset):
+    image_list = [original_dataset.image_list[idx] for idx in subset.indices]
+    label_list = [original_dataset.label_list[idx] for idx in subset.indices]
+    
+    class SubPepBDBDataset(Dataset):
+        def __init__(self, image_list, label_list):
+            self.image_list = image_list
+            self.label_list = label_list
+            self.transform = transforms.Compose([
+                transforms.Grayscale(num_output_channels=1),
+                transforms.ToTensor()
+            ])
+            
+        def __getitem__(self, index):
+            img_path = self.image_list[index]
+            image = Image.open(img_path)
+            image = self.transform(image)
+            label = torch.tensor(self.label_list[index], dtype=torch.long)
+            return image, label
+        
+        def __len__(self):
+            return len(self.label_list)
+    
+    return SubPepBDBDataset(image_list, label_list)
